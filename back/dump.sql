@@ -74,3 +74,29 @@ GROUP BY
     table_name 
 ORDER BY 
     table_name;
+    -- Таблица личных сообщений
+CREATE TABLE IF NOT EXISTS private_messages (
+    id SERIAL PRIMARY KEY,
+    sender_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    receiver_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    message_text TEXT NOT NULL,
+    is_read BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Индексы для быстрого поиска
+CREATE INDEX IF NOT EXISTS idx_private_messages_sender ON private_messages(sender_id);
+CREATE INDEX IF NOT EXISTS idx_private_messages_receiver ON private_messages(receiver_id);
+CREATE INDEX IF NOT EXISTS idx_private_messages_conversation ON private_messages(
+    LEAST(sender_id, receiver_id),
+    GREATEST(sender_id, receiver_id)
+);
+CREATE INDEX IF NOT EXISTS idx_private_messages_created ON private_messages(created_at);
+
+-- Таблица последних активностей
+CREATE TABLE IF NOT EXISTS user_activities (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    last_online TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    is_online BOOLEAN DEFAULT FALSE
+);
