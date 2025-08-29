@@ -1,5 +1,6 @@
 require('dotenv').config();
 const http = require('http');
+const { Server } = require('socket.io');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -14,7 +15,6 @@ const pool = new Pool({
     port: process.env.DB_PORT,
 });
 
-const messageHandler = new MessageHandler();
 const generateToken = (userId) => {
     return jwt.sign({ id: userId }, process.env.JWT_SECRET, {
         expiresIn: process.env.JWT_EXPIRE
@@ -42,11 +42,13 @@ const sendJsonResponse = (res, statusCode, data) => {
     res.end(JSON.stringify(data));
 };
 
+// Создаем HTTP сервер
 const server = http.createServer(async (req, res) => {
-    // CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // CORS headers - разрешаем только фронтенд на 3001 порту
+    res.setHeader('Access-Control-Allow-Origin', 'http://localhost:3001');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
     
     if (req.method === 'OPTIONS') {
         res.writeHead(200);
@@ -162,7 +164,7 @@ const server = http.createServer(async (req, res) => {
             return;
         }
 
-        // ==================== СООБЩЕНИЯ ====================
+        // ==================== ПОЛЬЗОВАТЕЛИ И СООБЩЕНИЯ ====================
         // Get users list
         if (url === '/api/users' && method === 'GET') {
             authMiddleware(req, async (error, userId) => {
@@ -236,15 +238,13 @@ const server = http.createServer(async (req, res) => {
                 const result = await pool.query('SELECT id, username, email, created_at FROM users ORDER BY id');
                 console.log('📊 Users in database:', result.rows);
                 
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ 
+                sendJsonResponse(res, 200, { 
                     total: result.rows.length,
                     users: result.rows 
-                }));
+                });
             } catch (error) {
                 console.error('Debug users error:', error);
-                res.writeHead(500, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ message: 'Ошибка получения пользователей' }));
+                sendJsonResponse(res, 500, { message: 'Ошибка получения пользователей' });
             }
             return;
         }
@@ -285,17 +285,111 @@ const server = http.createServer(async (req, res) => {
                     }
                 }
 
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ 
+                sendJsonResponse(res, 200, { 
                     message: `Создано ${createdCount} пользователей`,
                     total: createdCount
-                }));
+                });
 
             } catch (error) {
                 console.error('Create test users error:', error);
-                res.writeHead(500, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ message: 'Ошибка создания пользователей' }));
+                sendJsonResponse(res, 500, { message: 'Ошибка создания пользователей' });
             }
+            return;
+        }
+
+        // Debug endpoint - создать тестовые сообщения
+        if (url === '/api/debug/create-test-messages' && method === 'POST') {
+            authMiddleware(req, async (error, userId) => {
+                if (error) {
+                    return sendJsonResponse(res, 401, { message: 'Неавторизован' });
+                }
+
+                try {
+                    console.log('💬 Creating test messages...');
+                    
+                    // Получаем всех пользователей кроме текущего
+                    const usersResult = await pool.query(
+                        'SELECT id FROM users WHERE id != $1 ORDER BY id',
+                        [userId]
+                    );
+                    
+                    const otherUsers = usersResult.rows;
+                    if (otherUsers.length === 0) {
+                        return sendJsonResponse(res, 400, { 
+                            message: 'Нет других пользователей для отправки сообщений' 
+                        });
+                    }
+
+                    const testMessages = [
+                        { text: 'Привет! Как дела?', sender: userId, receiver: otherUsers[0].id },
+                        { text: 'Привет! Все отлично, а у тебя?', sender: otherUsers[0].id, receiver: userId },
+                        { text: 'Тоже хорошо! Что нового?', sender: userId, receiver: otherUsers[0].id },
+                        { text: 'Изучаю WebSocket, очень интересно!', sender: otherUsers[0].id, receiver: userId },
+                        { text: 'Это круто! У меня тоже получается', sender: userId, receiver: otherUsers[0].id },
+                        { text: 'Пока! Удачи с проектом!', sender: otherUsers[0].id, receiver: userId }
+                    ];
+
+                    let createdCount = 0;
+                    const errors = [];
+
+                    for (const msg of testMessages) {
+                        try {
+                            await pool.query(
+                                `INSERT INTO messages (sender_id, receiver_id, message_text, timestamp) 
+                                 VALUES ($1, $2, $3, NOW() - INTERVAL '${createdCount} minutes')`,
+                                [msg.sender, msg.receiver, msg.text]
+                            );
+                            createdCount++;
+                            console.log(`✅ Created message: ${msg.text}`);
+                        } catch (error) {
+                            console.log(`⚠️ Error creating message:`, error.message);
+                            errors.push(error.message);
+                        }
+                    }
+
+                    sendJsonResponse(res, 200, { 
+                        message: `Создано ${createdCount} тестовых сообщений`,
+                        created: createdCount,
+                        errors: errors.length > 0 ? errors : null
+                    });
+
+                } catch (error) {
+                    console.error('Create test messages error:', error);
+                    sendJsonResponse(res, 500, { message: 'Ошибка создания сообщений' });
+                }
+            });
+            return;
+        }
+
+        // Debug endpoint - получить все сообщения
+        if (url === '/api/debug/messages' && method === 'GET') {
+            authMiddleware(req, async (error, userId) => {
+                if (error) {
+                    return sendJsonResponse(res, 401, { message: 'Неавторизован' });
+                }
+
+                try {
+                    const result = await pool.query(`
+                        SELECT m.*, 
+                               s.username as sender_username,
+                               r.username as receiver_username
+                        FROM messages m
+                        LEFT JOIN users s ON m.sender_id = s.id
+                        LEFT JOIN users r ON m.receiver_id = r.id
+                        ORDER BY m.timestamp DESC
+                    `);
+                    
+                    console.log('📋 All messages in database:', result.rows);
+                    
+                    sendJsonResponse(res, 200, { 
+                        total: result.rows.length,
+                        messages: result.rows 
+                    });
+                } catch (error) {
+                    console.error('Debug messages error:', error);
+                    sendJsonResponse(res, 500, { message: 'Ошибка получения сообщений' });
+                }
+            });
             return;
         }
 
@@ -311,12 +405,57 @@ const server = http.createServer(async (req, res) => {
     }
 });
 
+// ==================== WEB SOCKET СЕРВЕР ====================
+const io = new Server(server, {
+    cors: {
+        origin: "http://localhost:3001",
+        methods: ["GET", "POST"],
+        credentials: true
+    }
+});
+
+// Создаем экземпляр MessageHandler после создания io
+const messageHandler = new MessageHandler(pool, io);
+
+// Middleware для аутентификации WebSocket
+io.use((socket, next) => {
+    const token = socket.handshake.auth.token;
+    
+    if (!token) {
+        return next(new Error('Authentication error'));
+    }
+
+    jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+        if (err) return next(new Error('Token invalid'));
+        
+        socket.userId = decoded.id;
+        socket.join(decoded.id.toString());
+        next();
+    });
+});
+
+// Обработка WebSocket подключений
+io.on('connection', (socket) => {
+    console.log('🔗 User connected via WebSocket:', socket.userId);
+
+    socket.on('disconnect', () => {
+        console.log('🔌 User disconnected:', socket.userId);
+    });
+
+    // Обработка ошибок
+    socket.on('error', (error) => {
+        console.error('WebSocket error:', error);
+    });
+});
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log('====================================');
     console.log('🚀 СЕРВЕР ЗАПУЩЕН');
     console.log('====================================');
     console.log(`📍 Порт: ${PORT}`);
-    console.log(`🌐 URL: http://localhost:${PORT}`);
+    console.log(`🌐 HTTP: http://localhost:${PORT}`);
+    console.log(`🔗 WebSocket: ws://localhost:${PORT}`);
+    console.log(`🎯 Frontend: http://localhost:3001`);
     console.log('====================================');
 });
